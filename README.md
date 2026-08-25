@@ -1,5 +1,8 @@
 # ESP32 OLED Video Streamer
 
+![Streamer UI Demo](Image.png)
+
+[**🎬 Watch the Demo Video Here**](Video.mp4)
 Stream any full-motion video directly from your desktop to an ESP32 hooked up to a 1.3" 128x64 I2C OLED screen! 
 
 This project consists of two parts: a high-speed Python script that decodes, downscales, and dithers video in real-time, and a highly optimized C++ firmware for the ESP32 that blasts the data to the OLED screen via raw I2C commands (bypassing slow Adafruit libraries). 
