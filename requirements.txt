@@ -1,0 +1,6 @@
+opencv-python
+numpy
+pyserial
+openai-whisper
+yt-dlp
+Pillow
