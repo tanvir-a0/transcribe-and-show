@@ -34,6 +34,8 @@ def get_audio_input():
             }],
             'outtmpl': '%(title)s.%(ext)s',
             'quiet': False,
+            # PROTECTIVE MEASURE: If the user provides a playlist link, only download the first video!
+            'noplaylist': True,
             # Fix: yt-dlp's Python API requires this to be a dictionary, not a list
             'js_runtimes': {'node': {}},
             # Force mobile clients to bypass YouTube's strict desktop anti-bot blocks
@@ -68,15 +70,21 @@ def main():
     if not audio_path or not os.path.exists(audio_path):
         print("No valid file selected or downloaded. Exiting.")
         return
+        
+    # Ask the user for the model accuracy level
+    model_size = simpledialog.askstring("Accuracy Level", "Enter Whisper model size:\n(tiny, base, small, medium, large)\n\nLarger models are MUCH more accurate for music, but take longer to download and run.", initialvalue="small")
+    if not model_size:
+        model_size = "small"
+    model_size = model_size.strip().lower()
 
-    print("\nLoading AI Transcription Model (base)...")
+    print(f"\nLoading AI Transcription Model ({model_size})...")
     print("If this is your first time, it might take a moment to download the model.")
     
     import torch
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
     
-    model = whisper.load_model("base", device=device)
+    model = whisper.load_model(model_size, device=device)
 
     print(f"\nTranscribing {os.path.basename(audio_path)}...")
     print("Listening to the audio... (This will take a few minutes depending on your PC speed)")
@@ -151,10 +159,11 @@ Write a Python file named `generated_visuals.py`. It MUST contain EXACTLY this f
 - The function MUST return a `PIL.Image` object in 'L' mode (grayscale), strictly 128x64 pixels. Colors can only be 0 (black) and 255 (white).
 
 COMPLEXITY REQUIREMENTS:
-I do not want basic shapes. I want highly complex, context-aware procedural graphics using trigonometry, math, and PIL.ImageDraw.
-1. When a word is active, analyze its semantic meaning in the context of the song '{title}'! For example, if the current word relates to a major theme in the song, use math to draw something representing it. Dynamically adapt the visual geometry to match the semantic meaning of whatever words are provided in the timeline.
-2. When a gap is active, generate intense abstract geometric math-art (e.g., fractals, rotating wireframe shapes, starfields, or complex particle physics). Use `current_time` to drive the animation flawlessly.
-3. The text must always be rendered clearly on top of the background geometry, perfectly centered. CRITICAL: DO NOT draw a solid black background box behind the text, as it will cover the background animations! Instead, draw a 1-pixel black outline around the letters for contrast, then draw the white text. Load a TrueType font (e.g., 'arial.ttf') and mathematically shrink `font_size` so `textbbox` fits within 128x64. Do not scale bitmap images!
+I do not want basic shapes and I DO NOT want repetitive animations!
+1. DO NOT hardcode a few generic `if/elif` blocks for specific words (e.g. `if "time" in text:`). That results in boring, repetitive graphics for the rest of the song.
+2. Instead, build a HIGHLY DYNAMIC PROCEDURAL ENGINE. Use properties of the current text (like `len(text)`, or `hash(text) % 20`, or its ASCII values) to mathematically alter the animation parameters! For example, use the word's hash to randomly change the rotation speed, the number of geometric nodes, the fractal depth, or the particle physics gravity. This guarantees that EVERY SINGLE WORD in the entire song gets a completely unique, non-repetitive graphical variation.
+3. For gaps (when no word is sung), generate intense abstract geometric math-art (e.g., 3D wireframe projections, starfields, or Lissajous curves) that heavily evolves over `current_time`.
+4. The text must always be rendered clearly on top of the background geometry, perfectly centered. CRITICAL: DO NOT draw a solid black background box behind the text, as it will cover the background animations! Instead, draw a 1-pixel black outline around the letters for contrast, then draw the white text. Load a TrueType font (e.g., 'arial.ttf') and mathematically shrink `font_size` so `textbbox` fits within 128x64. Do not scale bitmap images!
 
 DO NOT write a loop. DO NOT write video generation code. ONLY provide the `generated_visuals.py` module with the `render_frame` function.
 """

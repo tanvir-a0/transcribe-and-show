@@ -1,194 +1,127 @@
 import math
+import hashlib
 from PIL import Image, ImageDraw, ImageFont
 
-def rotate_3d(x, y, z, pitch, yaw, roll):
-    """Applies 3D rotation to a coordinate."""
-    # Pitch (x-axis)
-    cp, sp = math.cos(pitch), math.sin(pitch)
-    y, z = y * cp - z * sp, y * sp + z * cp
-    # Yaw (y-axis)
-    cy, sy = math.cos(yaw), math.sin(yaw)
-    x, z = x * cy + z * sy, -x * sy + z * cy
-    # Roll (z-axis)
-    cr, sr = math.cos(roll), math.sin(roll)
-    x, y = x * cr - y * sr, x * sr + y * cr
-    return x, y, z
-
-def project_3d_to_2d(x, y, z, fov=60, viewer_dist=2.5):
-    """Projects 3D coordinates to 2D screen space."""
-    factor = fov / (viewer_dist + z) if (viewer_dist + z) != 0 else fov
-    x_proj = int(64 + x * factor)
-    y_proj = int(32 + y * factor)
-    return x_proj, y_proj
-
-def draw_star(draw, cx, cy, radius, rotation, fill=255):
-    """Draws a procedural 5-pointed star."""
-    points = []
-    for i in range(10):
-        angle = rotation + i * (math.pi / 5)
-        r = radius if i % 2 == 0 else radius * 0.4
-        points.append((cx + r * math.cos(angle), cy + r * math.sin(angle)))
-    draw.polygon(points, outline=fill)
-
 def render_frame(current_time, current_event):
-    # Initialize 128x64 image in Grayscale ('L') mode
-    img = Image.new('L', (128, 64), 0)
+    # Fallback for missing/empty events
+    if not current_event:
+        current_event = {"type": "gap"}
+
+    # Initialize 128x64 1-bit grayscale image
+    img = Image.new('L', (128, 64), color=0)
     draw = ImageDraw.Draw(img)
-    
+
     event_type = current_event.get("type", "gap")
     text = current_event.get("text", "")
-    
-    # --- BACKGROUND GEOMETRY (Context-Aware) ---
-    if event_type == "gap":
-        # Intense abstract math-art: Rotating hypercube wireframe & warp tunnel
+
+    if event_type == "gap" or not text:
+        # ==========================================
+        # PROCEDURAL ENGINE: INTENSE MATH-ART (GAPS)
+        # ==========================================
+        t = current_time
+        cx, cy = 64, 32
+        points = []
+        num_points = 80
         
-        # Warp Tunnel
-        for i in range(40):
-            z = (i * 0.5 - current_time * 8.0) % 20.0 + 0.1
-            a = i * 0.4 + current_time * 3.0
-            tx = math.cos(a) * 15
-            ty = math.sin(a) * 15
-            px, py = project_3d_to_2d(tx, ty, z, fov=80, viewer_dist=0)
+        # Generate an evolving 3D-style Lissajous curve
+        for i in range(num_points):
+            u = i / float(num_points) * math.pi * 2
+            # Parametric equations that shift dynamically over time
+            x = 55 * math.sin(3 * u + t * 1.5) * math.cos(u + t * 0.8)
+            y = 30 * math.sin(2 * u - t * 1.2)
+            points.append((cx + x, cy + y))
+        
+        # Connect the points to form a wireframe mesh
+        for i in range(num_points):
+            p1 = points[i]
+            p2 = points[(i + 1) % num_points]
+            draw.line([p1, p2], fill=255, width=1)
+            
+        # Add a dynamic background starfield projection
+        for i in range(25):
+            sx = (math.sin(t * (i + 1) * 0.1) * 64 + 64) % 128
+            sy = (math.cos(t * (i + 2) * 0.1) * 32 + 32) % 64
+            draw.point((sx, sy), fill=255)
+            
+    else:
+        # ==========================================
+        # PROCEDURAL ENGINE: UNIQUE WORD GEOMETRY
+        # ==========================================
+        # Generate a stable, unique integer seed based on the word
+        h = int(hashlib.md5(text.encode('utf-8')).hexdigest(), 16)
+        
+        # Derive mathematical animation parameters from the hash
+        num_nodes = (h % 5) + 3           # 3 to 7 geometric nodes
+        radius = (h % 15) + 15            # Spacing radius: 15 to 29
+        speed = ((h % 100) / 50.0) + 0.5  # Rotation speed: 0.5 to 2.5
+        direction = 1 if h % 2 == 0 else -1
+        phase_shift = (h % 314) / 100.0   # Unique starting angle offset
+        
+        cx, cy = 64, 32
+        angle = current_time * speed * direction + phase_shift
+        
+        # Calculate rotating polygon nodes
+        poly_points = []
+        for i in range(num_nodes):
+            theta = angle + (i / float(num_nodes)) * math.pi * 2
+            px = cx + radius * math.cos(theta)
+            py = cy + radius * math.sin(theta)
+            poly_points.append((px, py))
+            
+        # Draw interlocking geometry between all nodes
+        for i in range(num_nodes):
+            for j in range(i + 1, num_nodes):
+                draw.line([poly_points[i], poly_points[j]], fill=255, width=1)
+                
+        # Generate particle physics tied to the specific word's length and hash
+        num_particles = min(len(text) * 3, 30)
+        for i in range(num_particles):
+            p_seed = (h * (i + 1)) % 1000
+            p_speed = (p_seed % 10) / 5.0 + 0.5
+            p_angle = (p_seed % 360) * math.pi / 180.0
+            dist = ((current_time * 25 * p_speed) + p_seed) % 80
+            
+            px = cx + dist * math.cos(p_angle)
+            py = cy + dist * math.sin(p_angle)
             if 0 <= px < 128 and 0 <= py < 64:
                 draw.point((px, py), fill=255)
 
-        # Rotating 3D Cube
-        cube_vertices = [
-            (-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1),
-            (-1, -1, 1),  (1, -1, 1),  (1, 1, 1),  (-1, 1, 1)
-        ]
-        cube_edges = [
-            (0,1), (1,2), (2,3), (3,0),
-            (4,5), (5,6), (6,7), (7,4),
-            (0,4), (1,5), (2,6), (3,7)
-        ]
-        pitch = current_time * 0.7
-        yaw = current_time * 1.1
-        roll = current_time * 1.3
-        
-        proj_verts = []
-        for v in cube_vertices:
-            rx, ry, rz = rotate_3d(v[0], v[1], v[2], pitch, yaw, roll)
-            proj_verts.append(project_3d_to_2d(rx, ry, rz))
-            
-        for edge in cube_edges:
-            p1 = proj_verts[edge[0]]
-            p2 = proj_verts[edge[1]]
-            draw.line([p1, p2], fill=255, width=1)
-            
-    elif event_type == "word":
-        lower_text = text.lower()
-        
-        # 1. Theme: Stars / Counting
-        if any(w in lower_text for w in ["star", "stars", "count", "counting"]):
-            for i in range(4):
-                offset = i * (math.pi / 2)
-                cx = 64 + 35 * math.cos(current_time * 2 + offset)
-                cy = 32 + 15 * math.sin(current_time * 3 + offset)
-                draw_star(draw, cx, cy, radius=8 + 3*math.sin(current_time*5+i), rotation=current_time*(1.5+i*0.5))
-                
-        # 2. Theme: Money / Dollars / World
-        elif any(w in lower_text for w in ["dollar", "dollars", "money", "sold", "world", "pay"]):
-            grid_spacing = int(8 + 4 * math.sin(current_time * 2))
-            offset_x = int(current_time * 20) % grid_spacing
-            offset_y = int(current_time * 15) % grid_spacing
-            for x in range(offset_x, 128, grid_spacing):
-                draw.line([(x, 0), (x, 64)], fill=255, width=1)
-            for y in range(offset_y, 64, grid_spacing):
-                draw.line([(0, y), (128, y)], fill=255, width=1)
-                
-        # 3. Theme: River / Swinging / Vine
-        elif any(w in lower_text for w in ["river", "swing", "swinging", "vine", "line"]):
-            for i in range(0, 128, 4):
-                y1 = 32 + 15 * math.sin(i * 0.05 + current_time * 4) + 8 * math.cos(i * 0.1 + current_time * 2)
-                y2 = 32 + 15 * math.sin((i+4) * 0.05 + current_time * 4) + 8 * math.cos((i+4) * 0.1 + current_time * 2)
-                draw.line([(i, y1), (i+4, y2)], fill=255, width=1)
-                
-                # Second overlapping wave
-                y3 = 32 + 10 * math.cos(i * 0.04 - current_time * 3)
-                y4 = 32 + 10 * math.cos((i+4) * 0.04 - current_time * 3)
-                draw.line([(i, y3), (i+4, y4)], fill=255, width=1)
-                
-        # 4. Theme: Burn / Kill / Alive / Hard
-        elif any(w in lower_text for w in ["burn", "kill", "alive", "hard", "fire", "pain"]):
-            points = []
-            for a in range(0, 360, 10):
-                rad = math.radians(a)
-                # High frequency jagged noise using trig
-                noise = math.sin(a * current_time) * math.cos(a * 2.5 + current_time * 10)
-                radius = 20 + 15 * noise
-                points.append((64 + radius * math.cos(rad), 32 + radius * math.sin(rad)))
-            points.append(points[0])
-            draw.line(points, fill=255, width=1)
-            
-        # 5. Theme: Dreaming / Sleep / Love / Praying
-        elif any(w in lower_text for w in ["dream", "sleep", "love", "pray", "faith", "heart", "feel"]):
-            # Pulsating concentric mandalas
-            for r in range(4, 60, 12):
-                pulse = r + 5 * math.sin(current_time * 2 - r * 0.1)
-                if pulse > 0:
-                    draw.ellipse([64 - pulse, 32 - pulse, 64 + pulse, 32 + pulse], outline=255)
-        
-        # Default Theme: Complex Lissajous figures
-        else:
-            prev_x, prev_y = None, None
-            for t in range(0, 100):
-                t_val = t * 0.1
-                A = 40 * math.sin(current_time * 0.5)
-                B = 25 * math.cos(current_time * 0.4)
-                a_freq, b_freq = 3, 2
-                delta = current_time * 2
-                
-                lx = 64 + A * math.sin(a_freq * t_val + delta)
-                ly = 32 + B * math.sin(b_freq * t_val)
-                if prev_x is not None:
-                    draw.line([(prev_x, prev_y), (lx, ly)], fill=255, width=1)
-                prev_x, prev_y = lx, ly
-
-    # --- FOREGROUND TEXT (Perfectly Centered & Scaled) ---
-    if event_type == "word" and text:
-        font_size = 48
+        # ==========================================
+        # TEXT RENDERING: DYNAMIC SCALING & OUTLINE
+        # ==========================================
+        font_size = 64
         font = None
-        font_name_used = None
         
-        # Try finding a standard OS TrueType font
-        standard_fonts = ['arial.ttf', 'DejaVuSans.ttf', 'FreeMono.ttf', 'LiberationSans-Regular.ttf', 'tahoma.ttf']
-        for fn in standard_fonts:
-            try:
-                font = ImageFont.truetype(fn, font_size)
-                font_name_used = fn
-                break
-            except IOError:
-                continue
-                
-        # Mathematically shrink to fit inside 128x64 bounds
-        if font is not None:
+        try:
+            # Shrink font mathematically until textbbox fits within 128x64
+            font = ImageFont.truetype("arial.ttf", font_size)
             while font_size > 8:
                 bbox = draw.textbbox((0, 0), text, font=font)
-                w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-                if w <= 124 and h <= 58:
+                w = bbox[2] - bbox[0]
+                h_text = bbox[3] - bbox[1]
+                # Max dimensions with a small margin
+                if w <= 124 and h_text <= 60:
                     break
                 font_size -= 2
-                font = ImageFont.truetype(font_name_used, font_size)
-        else:
-            # Absolute fallback if no TrueType fonts are available on the system
+                font = ImageFont.truetype("arial.ttf", font_size)
+        except IOError:
+            # Safe fallback if TrueType font is missing
             font = ImageFont.load_default()
-            
-        bbox = draw.textbbox((0, 0), text, font=font)
-        text_w = bbox[2] - bbox[0]
-        text_h = bbox[3] - bbox[1]
-        
-        x = (128 - text_w) / 2 - bbox[0]
-        y = (64 - text_h) / 2 - bbox[1]
-        
-        # Draw 1-pixel black outline (DO NOT draw a solid box)
+            bbox = draw.textbbox((0, 0), text, font=font)
+            w = bbox[2] - bbox[0]
+            h_text = bbox[3] - bbox[1]
+
+        # Calculate exact center coordinates
+        x = (128 - w) / 2.0 - bbox[0]
+        y = (64 - h_text) / 2.0 - bbox[1]
+
+        # Render 1-pixel Black Outline to separate text from background math-art
         for dx in [-1, 0, 1]:
             for dy in [-1, 0, 1]:
-                if dx == 0 and dy == 0:
-                    continue
-                draw.text((x + dx, y + dy), text, font=font, fill=0)
-                
-        # Draw crisp white text
+                if dx != 0 or dy != 0:
+                    draw.text((x + dx, y + dy), text, font=font, fill=0)
+
+        # Render White Text Foreground
         draw.text((x, y), text, font=font, fill=255)
 
     return img
