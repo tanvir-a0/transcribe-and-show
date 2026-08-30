@@ -1,0 +1,290 @@
+import hashlib
+import math
+import numpy as np
+from PIL import Image, ImageFont, ImageDraw
+
+# =====================================================================
+# GLOBAL PRECOMPUTATIONS & CACHES (For <15ms performance)
+# =====================================================================
+W, H = 128, 64
+
+# Coordinate grids
+XX, YY = np.meshgrid(np.arange(W), np.arange(H))
+# Normalized coordinates roughly centered at (0,0)
+NX = (XX - W/2) / (W/2)
+NY = (YY - H/2) / (H/2)
+
+# 4x4 Ordered Bayer Dithering Matrix (normalized to 0.0 - 1.0)
+BAYER = np.array([
+    [ 0,  8,  2, 10],
+    [12,  4, 14,  6],
+    [ 3, 11,  1,  9],
+    [15,  7, 13,  5]
+]) / 16.0
+DITHER_MATRIX = np.tile(BAYER, (H // 4, W // 4))
+
+FONT_CACHE = {}
+
+def get_font(size):
+    if size not in FONT_CACHE:
+        try:
+            FONT_CACHE[size] = ImageFont.truetype('arial.ttf', size)
+        except IOError:
+            FONT_CACHE[size] = ImageFont.load_default()
+    return FONT_CACHE[size]
+
+
+# =====================================================================
+# EFFECT FAMILIES (Must return 64x128 float array bounded approx 0.0 - 1.0)
+# =====================================================================
+
+def fx_plasma(ctx, progress, time):
+    """1. Full-screen dithered plasma / interference field (asymmetric)."""
+    t = time * 2.0 + progress * 5.0
+    v = np.sin(NX * 5.0 + t) + np.sin(NY * 4.0 - t) + np.sin(np.sqrt((NX+1)**2 + (NY-0.5)**2) * 8.0)
+    return (v + 3.0) / 6.0
+
+def fx_tunnel(ctx, progress, time):
+    """2. Perspective tunnel or concentric ripples rushing toward viewer."""
+    # Move the center point based on seed
+    cx = (ctx['seed'] % 3 - 1) * 0.5
+    cy = (ctx['seed'] % 5 - 2) * 0.2
+    dist = np.sqrt((NX - cx)**2 + (NY - cy)**2) + 0.01
+    v = np.sin(5.0 / dist - progress * 15.0 + time * 3.0)
+    return (v + 1.0) / 2.0
+
+def fx_metaballs(ctx, progress, time):
+    """3. Metaballs / threshold blob field that merges and splits."""
+    p1x, p1y = np.sin(time*1.5), np.cos(time*1.1)
+    p2x, p2y = np.cos(time*0.8), np.sin(time*1.4)
+    # Third blob driven by the word's attack/progress
+    p3x, p3y = (progress - 0.5) * 2, 0.0
+    
+    b1 = 0.1 / ((NX - p1x)**2 + (NY - p1y)**2 + 0.01)
+    b2 = 0.1 / ((NX - p2x)**2 + (NY - p2y)**2 + 0.01)
+    b3 = 0.2 / ((NX - p3x)**2 + (NY - p3y)**2 + 0.01)
+    
+    return np.clip((b1 + b2 + b3) * 0.8, 0.0, 1.0)
+
+def fx_wireframe(ctx, progress, time):
+    """4. Rotating 3D wireframe solid with real perspective projection."""
+    img = Image.new('L', (W, H), 0)
+    draw = ImageDraw.Draw(img)
+    verts = []
+    s, c = np.sin(time + progress), np.cos(time + progress)
+    
+    for x in [-1, 1]:
+        for y in [-1, 1]:
+            for z in [-1, 1]:
+                y1 = y*c - z*s
+                z1 = y*s + z*c
+                x2 = x*c - z1*s
+                z2 = x*s + z1*c
+                pz = z2 + 3.0
+                verts.append((x2 / pz * 32 + 64, y1 / pz * 32 + 32))
+                
+    edges = [(0,1), (1,3), (3,2), (2,0), (4,5), (5,7), (7,6), (6,4), (0,4), (1,5), (2,6), (3,7)]
+    for i, j in edges:
+        draw.line([verts[i], verts[j]], fill=255, width=2)
+    return np.array(img, dtype=float) / 255.0
+
+def fx_particles(ctx, progress, time):
+    """5. Particle system with physics (evaluated statelessly)."""
+    arr = np.zeros((H, W))
+    rng = np.random.RandomState(ctx['seed'])
+    t = progress * 2.5
+    for _ in range(40):
+        x0 = rng.uniform(0, 128)
+        y0 = rng.uniform(0, 64)
+        vx = rng.uniform(-30, 30)
+        vy = rng.uniform(-60, 10)
+        
+        x = (x0 + vx * t) % 128
+        y = y0 + vy * t + 0.5 * 250 * (t**2) # Gravity
+        if y > 63: 
+            y = 63 - (y - 63) * 0.6 # Bounce damping
+            
+        x, y = int(x), int(y)
+        if 0 <= x < 127 and 0 <= y < 63:
+            arr[y:y+2, x:x+2] = rng.uniform(0.5, 1.0) # 2x2 particle mass
+    return arr
+
+def fx_nested(ctx, progress, time):
+    """6. Recursive subdivision / nested rectangles."""
+    arr = np.zeros((H, W))
+    for i in range(1, 7):
+        size = (i * 12 + progress * 30) % 90
+        w, h = int(size * 2), int(size)
+        if w < 128 and h < 64:
+            y1, y2 = max(0, 32 - h//2), min(63, 32 + h//2)
+            x1, x2 = max(0, 64 - w//2), min(127, 64 + w//2)
+            val = 1.0 - (size / 90.0)
+            arr[y1:y2+1, x1:x1+2] = val
+            arr[y1:y2+1, x2-1:x2+1] = val
+            arr[y1:y1+2, x1:x2+1] = val
+            arr[y2-1:y2+1, x1:x2+1] = val
+    return arr
+
+def fx_glitch(ctx, progress, time):
+    """7. Scrolling horizontal scanline glitch with tearing."""
+    shift = (np.sin(NY[:,0] * 20.0 + time * 10.0) * 20 * progress).astype(int)
+    base = (np.sin(NX * 10.0) + 1) / 2.0
+    arr = np.zeros_like(base)
+    for y in range(H):
+        arr[y, :] = np.roll(base[y, :], shift[y])
+    return arr
+
+def fx_kaleidoscope(ctx, progress, time):
+    """8. Kaleidoscope mirrored wedges."""
+    angle = np.arctan2(NY, NX)
+    dist = np.sqrt(NX**2 + NY**2)
+    sectors = 6.0
+    angle = np.mod(angle, 2 * np.pi / sectors)
+    
+    nx = dist * np.cos(angle + time)
+    ny = dist * np.sin(angle + time)
+    v = np.sin(nx * 10.0 - progress * 8.0) + np.cos(ny * 10.0 + time)
+    return (v + 2.0) / 4.0
+
+def fx_grid(ctx, progress, time):
+    """9. Cellular-automaton / noise grid evolving cell by cell."""
+    scale = 8.0
+    gx = np.floor(NX * scale)
+    gy = np.floor(NY * scale)
+    h = np.sin(gx * 12.9898 + gy * 78.233 + time) * 43758.5453
+    val = h - np.floor(h)
+    return (val > (1.0 - progress)).astype(float)
+
+def fx_typographic(ctx, progress, time):
+    """10. Typographic: the word blown up huge, scrolled and mirrored."""
+    img = Image.new('L', (W, H), 0)
+    draw = ImageDraw.Draw(img)
+    word = ctx['text'].upper() if ctx['text'] else "OH"
+    font = get_font(32)
+    
+    x_offset = 128 - progress * 250
+    draw.text((x_offset, -5), word, font=font, fill=255)
+    draw.text((-x_offset + 40, 30), word, font=font, fill=128) # Fake dither shading
+    return np.array(img, dtype=float) / 255.0
+
+def fx_lightning(ctx, progress, time):
+    """11. Branching lightning / L-system growth from an edge."""
+    img = Image.new('L', (W, H), 0)
+    draw = ImageDraw.Draw(img)
+    rng = np.random.RandomState(ctx['seed'])
+    
+    def branch(x, y, angle, depth):
+        if depth > 4: return
+        length = rng.uniform(8, 20) * (1.0 - depth/5.0) * (progress * 2.5)
+        nx = x + np.cos(angle) * length
+        ny = y + np.sin(angle) * length
+        draw.line([(x,y), (nx,ny)], fill=255, width=max(1, 3-depth))
+        
+        if rng.uniform() < 0.8:
+            branch(nx, ny, angle + rng.uniform(0.3, 0.9), depth+1)
+        if rng.uniform() < 0.8:
+            branch(nx, ny, angle - rng.uniform(0.3, 0.9), depth+1)
+            
+    branch(0, 32, 0, 0)
+    return np.array(img, dtype=float) / 255.0
+
+def fx_floor(ctx, progress, time):
+    """12. Perspective checkerboard floor sliding towards viewer."""
+    y_clip = np.clip(np.abs(NY), 0.05, 1.0)
+    dist = 1.0 / y_clip
+    u = NX * dist
+    v = dist + time * 4.0 + progress * 8.0
+    
+    checker = (np.floor(u * 4) + np.floor(v * 4)) % 2
+    fade = np.clip((np.abs(NY) - 0.05) * 5.0, 0, 1) # Fade to horizon
+    return checker * fade
+
+
+# =====================================================================
+# CORE RENDER LOOP
+# =====================================================================
+
+def draw_centered_text(img, text, invert_colors):
+    """Shrinks text to fit and renders perfectly centered with an 8-way outline."""
+    draw = ImageDraw.Draw(img)
+    
+    font_size = 40
+    font = get_font(font_size)
+    while font_size > 8:
+        bbox = draw.textbbox((0, 0), text, font=font)
+        if (bbox[2] - bbox[0]) <= 120 and (bbox[3] - bbox[1]) <= 56:
+            break
+        font_size -= 2
+        font = get_font(font_size)
+        
+    bbox = draw.textbbox((0, 0), text, font=font)
+    x = (W - (bbox[2] - bbox[0])) / 2 - bbox[0]
+    y = (H - (bbox[3] - bbox[1])) / 2 - bbox[1]
+    
+    text_color = 0 if invert_colors else 255
+    outline_color = 255 if invert_colors else 0
+    
+    # Draw 8-way thick outline to punch out geometry behind text
+    offsets = [(-1,-1), (0,-1), (1,-1), (-1,0), (1,0), (-1,1), (0,1), (1,1)]
+    for ox, oy in offsets:
+        draw.text((x + ox, y + oy), text, font=font, fill=outline_color)
+        
+    draw.text((x, y), text, font=font, fill=text_color)
+    return img
+
+def render_frame(current_time, current_event):
+    if not current_event:
+        current_event = {"type": "gap"}
+        
+    ctype = current_event.get("type", "gap")
+    start = current_event.get("start", 0.0)
+    end = current_event.get("end", current_time + 1.0)
+    text = current_event.get("text", "")
+    
+    duration = max(end - start, 1e-3)
+    
+    if ctype == "gap":
+        scene_idx = int(current_time / 4)
+        seed = int(hashlib.md5(f"gap_{scene_idx}".encode()).hexdigest()[:8], 16)
+        progress = (current_time % 4.0) / 4.0
+        attack = 0.0
+    else:
+        # Seed on text AND timestamp to ensure 28 identical words look distinct
+        seed = int(hashlib.md5((text + "|" + str(start)).encode()).hexdigest()[:8], 16)
+        progress = np.clip((current_time - start) / duration, 0.0, 1.0)
+        # Visual attack flash in first 10%
+        attack = 1.0 if progress < 0.1 else 0.0
+        
+    ctx = {'seed': seed, 'text': text}
+    
+    # 12 distinct families dispatcher
+    families = [
+        fx_plasma, fx_tunnel, fx_metaballs, fx_wireframe, fx_particles, 
+        fx_nested, fx_glitch, fx_kaleidoscope, fx_grid, fx_typographic, 
+        fx_lightning, fx_floor
+    ]
+    
+    fx_idx = seed % len(families)
+    base_arr = families[fx_idx](ctx, progress, current_time)
+    
+    # OLED shading magic: Ordered Dithering
+    out_arr = (base_arr > DITHER_MATRIX) * 255.0
+    
+    # Global visual polarity variability (Anti-sameness rule B)
+    polarity_invert = (seed % 3 == 0)
+    if polarity_invert:
+        out_arr = 255.0 - out_arr
+        
+    # Attack pop (Anti-sameness Evolution rule)
+    if ctype == "word" and attack > 0.0:
+        if seed % 2 == 0:
+            out_arr = 255.0 - out_arr # Invert flash
+        else:
+            out_arr = np.full((H, W), 255.0) # White pop
+            
+    img = Image.fromarray(out_arr.astype(np.uint8), 'L')
+    
+    if ctype == "word" and text:
+        img = draw_centered_text(img, text, invert_colors=polarity_invert)
+        
+    return img

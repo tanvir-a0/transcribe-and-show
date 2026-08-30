@@ -1,0 +1,555 @@
+import hashlib
+import math
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+
+W, H = 128, 64
+YY, XX = np.mgrid[0:H, 0:W]
+XXF = XX.astype(np.float32)
+YYF = YY.astype(np.float32)
+
+_BAYER4 = np.array(
+    [[0, 8, 2, 10],
+     [12, 4, 14, 6],
+     [3, 11, 1, 9],
+     [15, 7, 13, 5]],
+    dtype=np.float32,
+) / 16.0
+BAYER = np.tile(_BAYER4, (H // 4, W // 4))
+
+
+def _resolve_font_name():
+    candidates = (
+        "arial.ttf",
+        r"C:\\Windows\\Fonts\\arial.ttf",
+        r"C:\\Windows\\Fonts\\arialbd.ttf",
+        "/usr/share/fonts/truetype/msttcorefonts/Arial.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    )
+    for candidate in candidates:
+        try:
+            ImageFont.truetype(candidate, 12)
+            return candidate
+        except OSError:
+            continue
+    raise OSError("A TrueType Arial-compatible font could not be found.")
+
+
+_FONT_NAME = _resolve_font_name()
+_FONT_CACHE = {size: ImageFont.truetype(_FONT_NAME, size) for size in range(8, 57)}
+_TEXT_LAYOUT_CACHE = {}
+
+
+def _font(size):
+    size = max(8, min(56, int(size)))
+    return _FONT_CACHE[size]
+
+
+def _clamp01(v):
+    return 0.0 if v < 0.0 else 1.0 if v > 1.0 else float(v)
+
+
+def _u(seed, shift=0):
+    x = (seed ^ (0x9E3779B9 * (shift + 1))) & 0xFFFFFFFF
+    x ^= (x >> 16)
+    x = (x * 0x7FEB352D) & 0xFFFFFFFF
+    x ^= (x >> 15)
+    x = (x * 0x846CA68B) & 0xFFFFFFFF
+    x ^= (x >> 16)
+    return (x & 0xFFFFFFFF) / 4294967295.0
+
+
+def _dither(field):
+    field = np.clip(field, 0.0, 1.0)
+    return np.where(field > BAYER, 255, 0).astype(np.uint8)
+
+
+def _paste_array(img, arr):
+    img.paste(Image.fromarray(arr.astype(np.uint8), mode="L"))
+
+
+def _reflect(pos, limit):
+    period = 2.0 * limit
+    q = np.mod(pos, period)
+    return np.where(q <= limit, q, period - q)
+
+
+# 1) Full-screen dithered plasma / interference field.
+def fx_plasma(draw, img, seed, progress, current_time, text):
+    a = 0.055 + 0.035 * _u(seed, 0)
+    b = 0.075 + 0.045 * _u(seed, 1)
+    c = 0.045 + 0.050 * _u(seed, 2)
+    phase = 6.28318 * _u(seed, 3) + progress * (4.0 + 4.0 * _u(seed, 4))
+    skew = 0.2 + 0.7 * _u(seed, 5)
+    f = (
+        np.sin(XXF * a + phase)
+        + np.sin(YYF * b - phase * 1.3)
+        + np.sin((XXF * skew + YYF) * c + phase * 0.7)
+        + np.sin(XXF * (0.025 + 0.035 * _u(seed, 6)) - YYF * (0.045 + 0.030 * _u(seed, 7)) - phase * 1.1)
+    )
+    field = 0.5 + 0.125 * f
+    _paste_array(img, _dither(field))
+    return False
+
+
+# 2) Perspective tunnel / concentric ripples rushing toward viewer.
+def fx_tunnel(draw, img, seed, progress, current_time, text):
+    cx = 18.0 + 92.0 * _u(seed, 0)
+    cy = 8.0 + 48.0 * _u(seed, 1)
+    dx = XXF - cx
+    dy = (YYF - cy) * (1.1 + 0.8 * _u(seed, 2))
+    r = np.sqrt(dx * dx + dy * dy) + 1e-3
+    ang = np.arctan2(dy, dx)
+    rush = progress * (12.0 + 12.0 * _u(seed, 3))
+    rings = np.sin(r * (0.28 + 0.12 * _u(seed, 4)) - rush + np.sin(ang * (3 + seed % 5)) * 1.2)
+    depth = 1.0 / (1.0 + r * 0.025)
+    field = np.clip(0.5 + 0.46 * rings * depth + 0.18 * depth, 0.0, 1.0)
+    _paste_array(img, _dither(field))
+    return False
+
+
+# 3) Metaballs / threshold blob field.
+def fx_metaballs(draw, img, seed, progress, current_time, text):
+    rng = np.random.default_rng(seed)
+    n = 4 + seed % 3
+    x0 = rng.uniform(-20.0, W + 20.0, n)
+    y0 = rng.uniform(-10.0, H + 10.0, n)
+    vx = rng.uniform(-42.0, 42.0, n)
+    vy = rng.uniform(-26.0, 26.0, n)
+    radii = rng.uniform(7.0, 15.0, n)
+    t = progress * (0.8 + 1.0 * _u(seed, 8))
+    xs = _reflect(x0 + vx * t, W - 1)
+    ys = _reflect(y0 + vy * t, H - 1)
+    field = np.zeros((H, W), dtype=np.float32)
+    for i in range(n):
+        d2 = (XXF - xs[i]) ** 2 + (YYF - ys[i]) ** 2 + 8.0
+        field += (radii[i] * radii[i]) / d2
+    soft = np.clip((field - 0.75) * 0.45, 0.0, 1.0)
+    _paste_array(img, _dither(soft))
+    return False
+
+
+# 4) Rotating 3D wireframe/solid with real perspective projection.
+def fx_wire3d(draw, img, seed, progress, current_time, text):
+    img.paste(0, (0, 0, W, H))
+    verts = np.array([
+        [-1, -1, -1], [1, -1, -1], [1, 1, -1], [-1, 1, -1],
+        [-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1],
+    ], dtype=np.float32)
+    faces = (
+        (0, 1, 2, 3), (4, 5, 6, 7), (0, 1, 5, 4),
+        (2, 3, 7, 6), (1, 2, 6, 5), (0, 3, 7, 4),
+    )
+    ax = 6.28318 * _u(seed, 0) + progress * (1.4 + 2.4 * _u(seed, 1))
+    ay = 6.28318 * _u(seed, 2) + progress * (2.0 + 2.8 * _u(seed, 3))
+    az = 6.28318 * _u(seed, 4) + progress * (0.8 + 1.6 * _u(seed, 5))
+    sx, cx = math.sin(ax), math.cos(ax)
+    sy, cy = math.sin(ay), math.cos(ay)
+    sz, cz = math.sin(az), math.cos(az)
+    rx = np.array([[1, 0, 0], [0, cx, -sx], [0, sx, cx]], dtype=np.float32)
+    ry = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]], dtype=np.float32)
+    rz = np.array([[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]], dtype=np.float32)
+    v = verts @ (rz @ ry @ rx).T
+    v[:, 2] += 4.2
+    focal = 37.0 + 16.0 * _u(seed, 6)
+    ox = 42.0 + 42.0 * _u(seed, 7)
+    oy = 23.0 + 18.0 * _u(seed, 8)
+    px = ox + focal * v[:, 0] / v[:, 2]
+    py = oy + focal * v[:, 1] / v[:, 2]
+    pts = np.stack((px, py), axis=1)
+    face_depth = [(float(np.mean(v[list(face), 2])), face) for face in faces]
+    face_depth.sort(reverse=True)
+    for rank, (_, face) in enumerate(face_depth):
+        p = [(int(pts[i, 0]), int(pts[i, 1])) for i in face]
+        if rank % 2 == 0:
+            draw.polygon(p, fill=255)
+        draw.line(p + [p[0]], fill=255, width=2)
+    return False
+
+
+# 5) Particle system with gravity, velocity and bouncing.
+def fx_particles(draw, img, seed, progress, current_time, text):
+    img.paste(0, (0, 0, W, H))
+    rng = np.random.default_rng(seed)
+    n = 22 + seed % 18
+    x0 = rng.uniform(0.0, W - 1.0, n)
+    y0 = rng.uniform(0.0, H - 1.0, n)
+    vx = rng.uniform(-85.0, 85.0, n)
+    vy = rng.uniform(-65.0, 25.0, n)
+    gravity = 45.0 + 70.0 * _u(seed, 0)
+    t = progress * (0.7 + 0.9 * _u(seed, 1))
+    xs = _reflect(x0 + vx * t, W - 1.0)
+    ys = _reflect(y0 + vy * t + 0.5 * gravity * t * t, H - 1.0)
+    sizes = 1 + rng.integers(0, 3, n)
+    for x, y, r in zip(xs, ys, sizes):
+        x = int(x)
+        y = int(y)
+        r = int(r)
+        draw.ellipse((x - r, y - r, x + r, y + r), fill=255)
+    # expanding impact mass, deliberately off-center
+    bx = int(8 + 110 * _u(seed, 2))
+    by = int(8 + 48 * _u(seed, 3))
+    rr = int(2 + 13 * min(1.0, progress * 1.6))
+    draw.ellipse((bx - rr, by - rr, bx + rr, by + rr), outline=255, width=2)
+    return False
+
+
+# 6) Recursive subdivision / fractal.
+def fx_fractal(draw, img, seed, progress, current_time, text):
+    img.paste(255, (0, 0, W, H))
+    max_depth = 2 + int(progress * 5.0)
+    inset = 1 + seed % 3
+    stack = [(0, 0, W - 1, H - 1, 0, seed)]
+    while stack:
+        x0, y0, x1, y1, depth, s = stack.pop()
+        if x1 - x0 < 5 or y1 - y0 < 5:
+            continue
+        if depth >= max_depth:
+            ax0, ay0 = x0 + inset, y0 + inset
+            ax1, ay1 = x1 - inset, y1 - inset
+            if ax1 < ax0 or ay1 < ay0:
+                continue
+            if ((s >> 3) ^ depth) & 1:
+                draw.rectangle((ax0, ay0, ax1, ay1), fill=0)
+            else:
+                draw.rectangle((ax0, ay0, ax1, ay1), outline=0, width=2)
+            continue
+        horizontal = ((s >> depth) & 1) == 0
+        ratio = 0.34 + 0.30 * _u(s, depth + 1)
+        if horizontal:
+            cut = int(y0 + (y1 - y0) * ratio)
+            draw.line((x0, cut, x1, cut), fill=0, width=2)
+            stack.append((x0, y0, x1, cut, depth + 1, s ^ 0xA511E9B3))
+            stack.append((x0, cut, x1, y1, depth + 1, s ^ 0x63D83595))
+        else:
+            cut = int(x0 + (x1 - x0) * ratio)
+            draw.line((cut, y0, cut, y1), fill=0, width=2)
+            stack.append((x0, y0, cut, y1, depth + 1, s ^ 0xB5297A4D))
+            stack.append((cut, y0, x1, y1, depth + 1, s ^ 0x1B56C4E9))
+    return True
+
+
+# 7) Scrolling bands / scanline glitch with tearing.
+def fx_glitch(draw, img, seed, progress, current_time, text):
+    base = np.full((H, W), 255, dtype=np.uint8)
+    freq = 2 + seed % 5
+    phase = int(progress * (22 + seed % 17))
+    rows = ((YY + phase) // freq) & 1
+    base[rows == 1] = 0
+    # chunky vertical bars prevent the image from reading as only scanlines
+    barw = 7 + seed % 11
+    bars = ((XX + int(progress * 70)) // barw) % 4 == 0
+    base[bars] = 0
+    rng = np.random.default_rng(seed)
+    cuts = np.sort(rng.integers(0, H, 9))
+    for i in range(len(cuts) - 1):
+        y0, y1 = int(cuts[i]), int(cuts[i + 1])
+        if y1 <= y0:
+            continue
+        shift = int((rng.integers(-26, 27)) * (0.25 + progress))
+        base[y0:y1] = np.roll(base[y0:y1], shift, axis=1)
+    # one moving blackout slice
+    sy = int((progress * 1.3 + _u(seed, 5)) * H) % H
+    base[max(0, sy - 2):min(H, sy + 3)] = 255
+    _paste_array(img, base)
+    return True
+
+
+# 8) Kaleidoscope: mirrored wedge in N sectors.
+def fx_kaleidoscope(draw, img, seed, progress, current_time, text):
+    cx = 20.0 + 88.0 * _u(seed, 0)
+    cy = 6.0 + 50.0 * _u(seed, 1)
+    dx = XXF - cx
+    dy = YYF - cy
+    r = np.hypot(dx, dy)
+    a = np.arctan2(dy, dx) + progress * (2.0 + 3.0 * _u(seed, 2))
+    sectors = 5 + seed % 6
+    wedge = (2.0 * math.pi) / sectors
+    local = np.mod(a, wedge)
+    local = np.minimum(local, wedge - local)
+    pattern = np.sin(r * (0.20 + 0.08 * _u(seed, 3)) + local * (11.0 + seed % 8))
+    mask = 0.5 + 0.45 * pattern * np.exp(-r / (95.0 + 30.0 * _u(seed, 4)))
+    _paste_array(img, _dither(mask))
+    return False
+
+
+# 9) Cellular automaton / evolving noise grid.
+def fx_cellular(draw, img, seed, progress, current_time, text):
+    rng = np.random.default_rng(seed)
+    gh, gw = 16, 32
+    cells = (rng.random((gh, gw)) > (0.52 + 0.12 * _u(seed, 0))).astype(np.uint8)
+    steps = 1 + int(progress * 9.0)
+    for _ in range(steps):
+        n = (
+            np.roll(cells, 1, 0) + np.roll(cells, -1, 0)
+            + np.roll(cells, 1, 1) + np.roll(cells, -1, 1)
+            + np.roll(np.roll(cells, 1, 0), 1, 1)
+            + np.roll(np.roll(cells, 1, 0), -1, 1)
+            + np.roll(np.roll(cells, -1, 0), 1, 1)
+            + np.roll(np.roll(cells, -1, 0), -1, 1)
+        )
+        birth = (n == 3)
+        survive = (cells == 1) & ((n == 2) | (n == 3))
+        cells = (birth | survive).astype(np.uint8)
+    arr = np.kron(cells, np.ones((4, 4), dtype=np.uint8))[:H, :W] * 255
+    _paste_array(img, arr)
+    return False
+
+
+# 10) Typographic family: the word itself is the background graphic.
+def fx_typographic(draw, img, seed, progress, current_time, text):
+    img.paste(0, (0, 0, W, H))
+    word = text if text else "..."
+    huge = _font(42 + seed % 15)
+    small = _font(12 + seed % 11)
+    shift = int(progress * (30 + seed % 50))
+    # huge clipped copy
+    bx = -int(10 + 70 * _u(seed, 0)) + shift
+    by = -int(4 + 24 * _u(seed, 1))
+    draw.text((bx, by), word, font=huge, fill=255)
+    # repeated tiled copies, alternately mirrored by reversing the string
+    tiny = word if (seed & 1) else word[::-1]
+    step_x = max(18, min(62, 8 + len(word) * 9))
+    for row, y in enumerate(range(-8, H + 14, 16)):
+        offset = (row * 13 + shift) % step_x
+        for x in range(-step_x, W + step_x, step_x):
+            draw.text((x + offset - step_x, y), tiny, font=small, fill=255)
+    return False
+
+
+# 11) Branching lightning / L-system growth from an edge.
+def fx_lightning(draw, img, seed, progress, current_time, text):
+    img.paste(255, (0, 0, W, H))
+    rng = np.random.default_rng(seed)
+    edge = seed % 4
+    if edge == 0:
+        root = np.array([0.0, rng.uniform(8, H - 8)], dtype=np.float32)
+        base_angle = 0.0
+    elif edge == 1:
+        root = np.array([W - 1.0, rng.uniform(8, H - 8)], dtype=np.float32)
+        base_angle = math.pi
+    elif edge == 2:
+        root = np.array([rng.uniform(8, W - 8), 0.0], dtype=np.float32)
+        base_angle = math.pi / 2.0
+    else:
+        root = np.array([rng.uniform(8, W - 8), H - 1.0], dtype=np.float32)
+        base_angle = -math.pi / 2.0
+    segments = []
+    tips = [(root, base_angle, 0)]
+    while tips and len(segments) < 80:
+        p, ang, depth = tips.pop(0)
+        if depth > 7:
+            continue
+        branches = 2 if rng.random() < 0.38 else 1
+        for b in range(branches):
+            jitter = rng.normal(0.0, 0.32 + 0.05 * depth)
+            a = ang + jitter + (b - 0.5) * (0.55 if branches == 2 else 0.0)
+            length = max(3.0, rng.uniform(6.0, 16.0) * (0.90 ** depth))
+            q = p + np.array([math.cos(a) * length, math.sin(a) * length], dtype=np.float32)
+            segments.append((p.copy(), q.copy(), depth))
+            if -10 < q[0] < W + 10 and -10 < q[1] < H + 10:
+                tips.append((q, a, depth + 1))
+    visible = max(1, int(len(segments) * min(1.0, progress * 1.35)))
+    for p, q, depth in segments[:visible]:
+        width = 3 if depth < 2 else 2 if depth < 5 else 1
+        draw.line((int(p[0]), int(p[1]), int(q[0]), int(q[1])), fill=0, width=width)
+    return True
+
+
+# 12) Perspective checkerboard floor / warped grid with moving horizon.
+def fx_checkerboard(draw, img, seed, progress, current_time, text):
+    horizon = 12.0 + 15.0 * _u(seed, 0)
+    vanish_x = 18.0 + 92.0 * _u(seed, 1)
+    y = YYF - horizon
+    floor = y > 0.5
+    inv = np.zeros_like(YYF, dtype=np.float32)
+    inv[floor] = 1.0 / y[floor]
+    depth = np.zeros_like(YYF, dtype=np.float32)
+    depth[floor] = (48.0 + 30.0 * _u(seed, 2)) * inv[floor] + progress * (4.0 + 7.0 * _u(seed, 3))
+    spread = (XXF - vanish_x) * inv * (18.0 + 14.0 * _u(seed, 4))
+    cx = np.floor(spread + 100.0).astype(np.int32)
+    cy = np.floor(depth).astype(np.int32)
+    checker = ((cx + cy) & 1).astype(np.float32)
+    sky = 0.78 - 0.30 * (YYF / H) + 0.08 * np.sin(XXF * 0.08 + progress * 5.0)
+    field = np.where(floor, 0.12 + 0.78 * checker, sky)
+    arr = _dither(field)
+    _paste_array(img, arr)
+    # horizon mass
+    draw.rectangle((0, int(horizon) - 1, W, int(horizon) + 1), fill=0)
+    return True
+
+
+FAMILIES = [
+    fx_plasma,
+    fx_tunnel,
+    fx_metaballs,
+    fx_wire3d,
+    fx_particles,
+    fx_fractal,
+    fx_glitch,
+    fx_kaleidoscope,
+    fx_cellular,
+    fx_typographic,
+    fx_lightning,
+    fx_checkerboard,
+]
+
+
+def _gap_nebula(current_time):
+    phase = current_time * 0.42
+    f = (
+        np.sin(XXF * 0.055 + phase)
+        + np.sin(YYF * 0.083 - phase * 0.7)
+        + np.sin((XXF + YYF * 1.7) * 0.031 + phase * 0.9)
+    )
+    glow = np.exp(-((XXF - (28 + 55 * math.sin(current_time * 0.11))) ** 2 + (YYF - 30) ** 2) / 1500.0)
+    field = np.clip(0.46 + 0.13 * f + 0.28 * glow, 0.0, 1.0)
+    return _dither(field), False
+
+
+def _gap_starfield(current_time):
+    arr = np.zeros((H, W), dtype=np.uint8)
+    seed = int(current_time // 4) * 2654435761 & 0xFFFFFFFF
+    rng = np.random.default_rng(seed)
+    n = 70
+    z0 = rng.uniform(0.08, 1.0, n)
+    a = rng.uniform(0.0, math.tau, n)
+    r = rng.uniform(3.0, 44.0, n)
+    t = (current_time * 0.12) % 1.0
+    z = (z0 - t) % 1.0 + 0.05
+    cx, cy = 76.0, 27.0
+    xs = cx + np.cos(a) * r / z
+    ys = cy + np.sin(a) * r * 0.55 / z
+    valid = (xs >= 0) & (xs < W) & (ys >= 0) & (ys < H)
+    xi = xs[valid].astype(np.int32)
+    yi = ys[valid].astype(np.int32)
+    arr[yi, xi] = 255
+    # sparse thick stars
+    for x, y in zip(xi[::9], yi[::9]):
+        arr[max(0, y - 1):min(H, y + 2), max(0, x - 1):min(W, x + 2)] = 255
+    return arr, False
+
+
+def _gap_rings(current_time):
+    cx = 22.0 + 48.0 * (0.5 + 0.5 * math.sin(current_time * 0.19))
+    cy = 18.0 + 16.0 * (0.5 + 0.5 * math.cos(current_time * 0.15))
+    r = np.hypot(XXF - cx, (YYF - cy) * 1.25)
+    f = 0.5 + 0.42 * np.sin(r * 0.31 - current_time * 1.4) * np.exp(-r / 105.0)
+    return _dither(f), False
+
+
+def _gap_silhouette(current_time):
+    arr = np.full((H, W), 255, dtype=np.uint8)
+    horizon = 39 + int(4 * math.sin(current_time * 0.23))
+    arr[horizon:, :] = 0
+    # slow moving blocky skyline / mountains
+    x = np.arange(W)
+    h1 = (5 + 5 * np.sin(x * 0.11 + current_time * 0.21)).astype(np.int32)
+    h2 = (3 + 4 * np.sin(x * 0.047 - current_time * 0.14 + 1.7)).astype(np.int32)
+    heights = np.maximum(1, h1 + h2)
+    skyline = (YY >= (horizon - heights[None, :])) & (YY < horizon)
+    arr[skyline] = 0
+    # moon cutout
+    mx = int(18 + (current_time * 3.0) % 92)
+    my = 13
+    rr = 6
+    mask = (XX - mx) ** 2 + (YY - my) ** 2 <= rr * rr
+    arr[mask] = 0
+    return arr, True
+
+
+GAP_SCENES = [_gap_nebula, _gap_starfield, _gap_rings, _gap_silhouette]
+
+
+def _apply_attack(img, seed, elapsed):
+    light_toggle = False
+    if elapsed < 0.055:
+        arr = 255 - np.asarray(img, dtype=np.uint8)
+        img = Image.fromarray(arr, mode="L")
+        light_toggle = True
+    elif elapsed < 0.100:
+        draw = ImageDraw.Draw(img)
+        # hard, directional frame flash without obscuring the whole effect
+        side = seed % 4
+        if side == 0:
+            draw.rectangle((0, 0, 5, H - 1), fill=255)
+        elif side == 1:
+            draw.rectangle((W - 6, 0, W - 1, H - 1), fill=255)
+        elif side == 2:
+            draw.rectangle((0, 0, W - 1, 5), fill=255)
+        else:
+            draw.rectangle((0, H - 6, W - 1, H - 1), fill=255)
+    return img, light_toggle
+
+
+def _draw_centered_word(img, text, light_background):
+    text = str(text or "")
+    if not text:
+        return
+    draw = ImageDraw.Draw(img)
+    layout = _TEXT_LAYOUT_CACHE.get(text)
+    if layout is None:
+        font_size = 56
+        while font_size > 8:
+            font = _font(font_size)
+            bbox = draw.textbbox((0, 0), text, font=font)
+            tw = bbox[2] - bbox[0]
+            th = bbox[3] - bbox[1]
+            if tw <= W - 4 and th <= H - 4:
+                break
+            font_size -= 1
+        font = _font(font_size)
+        bbox = draw.textbbox((0, 0), text, font=font)
+        tw = bbox[2] - bbox[0]
+        th = bbox[3] - bbox[1]
+        x = int((W - tw) / 2 - bbox[0])
+        y = int((H - th) / 2 - bbox[1])
+        layout = (font, x, y)
+        _TEXT_LAYOUT_CACHE[text] = layout
+    else:
+        font, x, y = layout
+
+    if light_background:
+        outline, fill = 255, 0
+    else:
+        outline, fill = 0, 255
+
+    for ox, oy in ((-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)):
+        draw.text((x + ox, y + oy), text, font=font, fill=outline)
+    draw.text((x, y), text, font=font, fill=fill)
+
+
+def render_frame(current_time, current_event):
+    if not current_event: current_event = {"type": "gap"}
+    event_type = current_event.get("type", "gap")
+    text = str(current_event.get("text", "") or "")
+    start = float(current_event.get("start", current_time) or 0.0)
+    end = float(current_event.get("end", start + 1.0) or (start + 1.0))
+
+    if event_type == "gap":
+        scene = GAP_SCENES[int(float(current_time) / 4.0) % len(GAP_SCENES)]
+        arr, _ = scene(float(current_time))
+        arr = np.where(arr >= 128, 255, 0).astype(np.uint8)
+        return Image.fromarray(arr, mode="L")
+
+    duration = max(end - start, 1e-3)
+    progress = _clamp01((float(current_time) - start) / duration)
+    seed = int(hashlib.md5((text + "|" + str(current_event.get("start", 0))).encode()).hexdigest()[:8], 16)
+
+    img = Image.new("L", (W, H), 0)
+    draw = ImageDraw.Draw(img)
+    family = FAMILIES[seed % len(FAMILIES)]
+    light_background = bool(family(draw, img, seed, progress, float(current_time), text))
+
+    elapsed = max(0.0, float(current_time) - start)
+    img, toggled = _apply_attack(img, seed, elapsed)
+    if toggled:
+        light_background = not light_background
+
+    _draw_centered_word(img, text, light_background)
+
+    # Force true 1-bit values while keeping PIL mode 'L'.
+    arr = np.asarray(img, dtype=np.uint8)
+    arr = np.where(arr >= 128, 255, 0).astype(np.uint8)
+    return Image.fromarray(arr, mode="L")
