@@ -1,25 +1,74 @@
-You are an expert creative generative artist and Python developer. 
+You are an expert generative artist and Python developer specializing in 1-bit demoscene graphics.
 I am building a live procedural music visualizer for a monochrome OLED display (128x64 pixels, 1-bit color).
-The visualizer is specifically for the song 'OneRepublic - Counting Stars'.
+The visualizer is for the song 'OneRepublic - Counting Stars'.
 
-I have a `timeline.json` mapping lyrics and gaps to exact millisecond timestamps.
+I have a `timeline.json` mapping every lyric word and instrumental gap to exact millisecond timestamps.
 
 YOUR TASK:
 Write a Python file named `generated_visuals.py`. It MUST contain EXACTLY this function signature:
 `def render_frame(current_time, current_event):`
 
-- `current_time`: A float representing seconds elapsed.
-- `current_event`: A dictionary from the timeline (e.g., `{"type": "word", "text": "Hello"}` or `{"type": "gap"}`). IMPORTANT: This may be `None` or an empty dict `{}`, so always use `if not current_event: current_event = {"type": "gap"}` to be safe!
-- The function MUST return a `PIL.Image` object in 'L' mode (grayscale), strictly 128x64 pixels. Colors can only be 0 (black) and 255 (white).
+- `current_time`: float, seconds elapsed since the song started.
+- `current_event`: a dict from the timeline, e.g. `{"type": "word", "text": "Hello", "start": 12.4, "end": 12.9}` or `{"type": "gap", "start": ..., "end": ...}`. It may be `None` or `{}`, so begin with `if not current_event: current_event = {"type": "gap"}` and read every key with `.get()`.
+- MUST return a `PIL.Image` in 'L' mode, exactly 128x64. Only values 0 (black) and 255 (white) may appear in the returned image.
 
-COMPLEXITY REQUIREMENTS:
-I do not want basic shapes and I DO NOT want repetitive animations!
-1. DO NOT hardcode a few generic `if/elif` blocks for specific words (e.g. `if "time" in text:`). That results in boring, repetitive graphics for the rest of the song.
-2. Instead, build a HIGHLY DYNAMIC PROCEDURAL ENGINE. Use properties of the current text (like `len(text)`, or `hash(text) % 20`, or its ASCII values) to mathematically alter the animation parameters! For example, use the word's hash to randomly change the rotation speed, the number of geometric nodes, the fractal depth, or the particle physics gravity. This guarantees that EVERY SINGLE WORD in the entire song gets a completely unique, non-repetitive graphical variation.
-3. For gaps (when no word is sung), generate intense abstract geometric math-art (e.g., 3D wireframe projections, starfields, or Lissajous curves) that heavily evolves over `current_time`.
-4. The text must always be rendered clearly on top of the background geometry, perfectly centered. CRITICAL: DO NOT draw a solid black background box behind the text, as it will cover the background animations! Instead, draw a 1-pixel black outline around the letters for contrast, then draw the white text. Load a TrueType font (e.g., 'arial.ttf') and mathematically shrink `font_size` so `textbbox` fits within 128x64. Do not scale bitmap images!
+=== THE CRITICAL PROBLEM YOU MUST SOLVE ===
 
-DO NOT write a loop. DO NOT write video generation code. ONLY provide the `generated_visuals.py` module with the `render_frame` function.
+My previous attempt failed and looked extremely repetitive. Here is exactly why, measured on the real timeline. Do not repeat these two mistakes:
+
+MISTAKE 1 - The seed was derived from the word text alone.
+This song has 461 words but only 104 unique ones; 92% of all words are repeats. The word "been" is sung 28 times. With a text-only seed, all 28 renders were pixel-identical, so every chorus was a literal replay of the same animation.
+FIX: seed on the word AND its timestamp, so the same word looks different every time it is sung:
+    seed = int(hashlib.md5((text + "|" + str(current_event.get("start", 0))).encode()).hexdigest()[:8], 16)
+Derive every parameter from this `seed`.
+
+MISTAKE 2 - There was only ONE effect, whose parameters were varied by the hash.
+Varying node count, radius and rotation speed of a single spinning polygon does NOT produce visual variety. A 5-sided polygon at radius 18 and a 6-sided one at radius 24 are indistinguishable at 128x64. Random parameters are not interesting; STRUCTURAL change is.
+FIX: write at least 12 SEPARATE render functions that produce structurally different KINDS of image, and dispatch on the seed:
+    FAMILIES = [fx_plasma, fx_tunnel, fx_metaballs, ...]
+    FAMILIES[seed % len(FAMILIES)](draw, img, seed, progress, current_time, text)
+
+=== REQUIRED EFFECT FAMILIES (at least 12, one function each) ===
+Each must be a genuinely different visual language, not a re-parameterisation:
+1.  Full-screen dithered plasma / interference field (sine sums over the whole frame, no center symmetry)
+2.  Perspective tunnel or concentric ripples rushing toward the viewer
+3.  Metaballs / threshold blob field that merges and splits
+4.  Rotating 3D wireframe solid with real perspective projection (cube, icosahedron, torus)
+5.  Particle system with actual physics: gravity, velocity, bounce off the frame edges
+6.  Recursive subdivision or fractal (nested rectangles, binary tree, Sierpinski)
+7.  Scrolling horizontal or vertical bands / scanline glitch with slicing and offset tearing
+8.  Kaleidoscope: one wedge mirrored into N sectors
+9.  Cellular-automaton or noise grid that evolves cell by cell
+10. Typographic: the WORD ITSELF is the graphic - tiled, repeated, mirrored, warped, or blown up huge and clipped by the frame
+11. Branching lightning / L-system growth from an edge
+12. Perspective checkerboard floor or warped grid with a moving horizon
+
+=== ANTI-SAMENESS RULES (these matter more than the math) ===
+A. DO NOT center everything at (64,32). Uniform centered radial blobs all look identical no matter how clever the equations are. At least half the families must be full-frame, off-center, edge-anchored, or asymmetric.
+B. VARY THE POLARITY. Roughly a third of the families must draw black-on-white: fill the image with 255 and draw with 0. On a monochrome panel this is the single largest perceived difference between two frames.
+C. VARY THE DENSITY. Some families sparse (scattered points), some dense (large filled masses). Do not make everything a mid-density web of lines.
+D. USE DITHERING FOR GRADIENTS. Compute a float intensity per pixel with numpy, then threshold it against an ordered 4x4 Bayer matrix to get 0/255. This yields apparent gradients, glow and shading, which read far better on an OLED than wireframes.
+E. PREFER FILLED SHAPES AND LARGE MASSES OVER 1-PIXEL LINES. Single-pixel lines shimmer and look sparse at 128x64.
+
+=== EVOLUTION WITHIN EACH WORD ===
+Words last only 0.15 to 1.3 seconds, so each effect must read instantly and must visibly change across its own duration. Compute:
+    progress = clamp((current_time - start) / max(end - start, 1e-3), 0.0, 1.0)
+Drive the effect with `progress`, not only with `current_time`, so it grows, explodes, collapses or sweeps across the word. Give every word a hard visual ATTACK in its first ~100ms (a flash, a full-frame inversion, or a burst) so the beat of the lyrics is felt.
+
+=== GAPS ===
+For `type == "gap"`, run a slow, evolving, cinematic instrumental scene driven by `current_time`. Switch between several gap scenes based on `int(current_time / 4) % N` so a long instrumental break does not sit on one image.
+
+=== TEXT RENDERING (this part already works - keep it exactly) ===
+Render the word clearly on top of the background geometry, perfectly centered. DO NOT draw a solid black background box behind the text; it would cover the animation. Instead draw a 1-pixel black outline around the glyphs by drawing the text 8 times at +/-1 pixel offsets in black, then the white text on top. Load a TrueType font ('arial.ttf') and mathematically shrink `font_size` until `textbbox` fits inside 128x64. Never scale a bitmap font. If the background family is white-on-black polarity, invert the text colors so it stays readable.
+
+=== PERFORMANCE (hard requirement) ===
+The frame must render in under 15 ms or the display will stutter.
+- Cache fonts at module level in a dict keyed by size. NEVER call `ImageFont.truetype()` inside the sizing loop on every frame.
+- Precompute numpy coordinate grids (`YY, XX = np.mgrid[0:64, 0:128]`) once at module level.
+- Use vectorised numpy for any per-pixel effect. Never write nested Python loops over all 8192 pixels.
+- Build per-pixel effects as a numpy array and convert with `Image.fromarray(arr.astype(np.uint8), 'L')`.
+
+DO NOT write a main loop. DO NOT write video generation code. Output ONLY the complete `generated_visuals.py` module.
 
 [
   {
