@@ -1,6 +1,16 @@
-opencv-python
+# --- Live streaming + rendering (Step 3) ---
 numpy
-pyserial
-openai-whisper
-yt-dlp
 Pillow
+opencv-python
+pyserial
+
+# --- AI transcription (Step 1) ---
+openai-whisper
+torch          # imported directly by generate_timeline_whisper.py for CUDA detection
+yt-dlp         # YouTube audio download
+
+# NOTE: ffmpeg must ALSO be installed and on your PATH.
+# Whisper uses it to decode audio, and yt-dlp uses it to extract MP3.
+#   Windows: choco install ffmpeg
+# NOTE: Node.js is required only for YouTube downloads (yt-dlp runs its JS challenge solver).
+#   Windows: choco install nodejs -y
